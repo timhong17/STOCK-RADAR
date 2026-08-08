@@ -7,9 +7,11 @@ from plotly.subplots import make_subplots
 from datetime import datetime
 import time
 import random
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
 
-# 嘗試使用 curl_cffi 模擬瀏覽器指紋，可大幅降低被 Yahoo Finance 限流(429)的機率
-# 若環境沒有安裝 curl_cffi，則自動退回使用 yfinance 預設的 requests session
+# 嘗試使用 curl_cffi 模擬瀏覽器指紋，降低被 Yahoo Finance 限流(429)的機率
 try:
     from curl_cffi import requests as cffi_requests
     CURL_CFFI_AVAILABLE = True
@@ -17,45 +19,129 @@ except ImportError:
     CURL_CFFI_AVAILABLE = False
 
 # ==========================================
-# 頁面與樣式設定
+# 常用台股中文名稱對照表
+# ==========================================
+TW_STOCK_NAMES = {
+    "2330.TW": "台積電",
+    "2317.TW": "鴻海",
+    "2454.TW": "聯發科",
+    "2308.TW": "台達電",
+    "2382.TW": "廣達",
+    "3231.TW": "緯創",
+    "2603.TW": "長榮",
+    "2881.TW": "富邦金",
+    "2882.TW": "國泰金",
+    "2303.TW": "聯電",
+    "3037.TW": "欣興",
+    "2357.TW": "華碩",
+    "2376.TW": "技嘉",
+    "2377.TW": "微星",
+    "6669.TW": "緯穎",
+    "3661.TW": "世芯-KY",
+    "3443.TW": "創意",
+    "3008.TW": "大立光",
+    "2327.TW": "國巨",
+    "2609.TW": "陽明",
+    "2615.TW": "萬海",
+    "2002.TW": "中鋼",
+    "1301.TW": "台塑",
+    "1303.TW": "南亞",
+    "2412.TW": "中華電",
+    "3034.TW": "聯詠",
+    "3711.TW": "日月光投控"
+}
+
+def get_chinese_stock_name(symbol, raw_info_name):
+    if symbol in TW_STOCK_NAMES:
+        return TW_STOCK_NAMES[symbol]
+    
+    if symbol.endswith(".TW") or symbol.endswith(".TWO"):
+        code = symbol.split(".")[0]
+        return f"台股 {code}"
+    
+    return raw_info_name if raw_info_name else symbol
+
+# ==========================================
+# 頁面與高閱讀性典雅字體設定 (Platinum Elegance Design)
 # ==========================================
 st.set_page_config(
     page_title="台美股智慧選股儀表板 Pro",
-    page_icon="▲",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap');
+    /* 引入高閱讀性兼具典雅筆畫的字體庫 */
+    @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Prata&family=Noto+Sans+TC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 
     :root {
-        --bg-0: #0A0E16;      /* 最底層背景 */
-        --bg-1: #10141F;      /* 側邊欄 / 卡片背景 */
-        --bg-2: #171C2B;      /* 次層卡片背景 */
-        --line: #262C40;      /* 邊框線 */
-        --text-hi: #E7E9F3;   /* 主要文字 */
-        --text-lo: #7C8299;   /* 次要文字 */
-        --accent: #6C8CFF;    /* 單一主色調（藍） */
-        --accent-dim: #3D4E8F;/* 主色調的暗版，用於邊框/底色 */
-        --accent-glow: rgba(108, 140, 255, 0.18);
+        --bg-0: #050505;        /* 極致深黑主畫面底色 */
+        --bg-1: #0A0D14;        /* 側邊欄深邃星空底色 */
+        --bg-2: #121722;        /* 側邊欄控制元件背景 */
+        --line: #212836;        /* 星空暗灰邊框 */
+        --line-bright: #8A99AD; /* 亮銀星光邊框 */
+        --text-hi: #F0F6FC;     /* 白金高亮字 */
+        --text-lo: #8A99AD;     /* 沉靜灰字 */
+        
+        /* 銀灰星空色系 (Platinum Starlight) */
+        --starlight-white: #FFFFFF;
+        --starlight-silver: #D5E0EA;
+        --starlight-dim: #708090;
+        --starlight-grad: linear-gradient(135deg, #FFFFFF 0%, #B0C4DE 50%, #708090 100%);
+        --starlight-grad-soft: linear-gradient(135deg, rgba(255, 255, 255, 0.08) 0%, rgba(176, 196, 222, 0.03) 100%);
+        --starlight-glow: rgba(220, 230, 242, 0.35);
+    }
+
+    /* -----------------------------------------------------------
+       1. 深度解決鍵盤字體破圖 (keyboard_double...)
+       ----------------------------------------------------------- */
+    [data-testid="stSidebarCollapseButton"] button,
+    [data-testid="stSidebarCollapseButton"] button *,
+    [data-testid="stSidebarCollapseButton"] span,
+    [data-testid="stSidebarCollapseButton"] i,
+    [data-testid="stSidebarHeader"] * {
+        font-size: 0px !important;
+        line-height: 0 !important;
+        visibility: hidden !important;
+    }
+    [data-testid="stSidebarCollapseButton"] button {
+        visibility: visible !important;
+        position: relative !important;
+        width: 32px !important;
+        height: 32px !important;
+        background: transparent !important;
+        border: none !important;
+    }
+    [data-testid="stSidebarCollapseButton"] button::before {
+        content: "◀" !important;
+        visibility: visible !important;
+        font-size: 14px !important;
+        color: #B0C4DE !important;
+        position: absolute !important;
+        left: 8px !important;
+        top: 6px !important;
     }
 
     /* 全域背景與文字 */
     .stApp {
         background: var(--bg-0);
         color: var(--text-hi);
-        font-family: 'Inter', sans-serif;
+        font-family: 'Noto Sans TC', -apple-system, sans-serif;
+        font-size: 1rem;
+        line-height: 1.6;
+        letter-spacing: 0.015em;
     }
 
-    /* 主標題 */
+    /* 頂部主標題 */
     .main-header {
-        font-family: 'Space Grotesk', sans-serif;
-        font-size: 2.4rem;
+        font-family: 'Cinzel', 'Prata', serif;
+        font-size: 2.6rem;
         font-weight: 700;
-        letter-spacing: -0.01em;
-        color: var(--text-hi);
+        letter-spacing: 0.06em;
+        background: var(--starlight-grad);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
         margin-bottom: 0.4rem;
         padding-bottom: 0.6rem;
         border-bottom: 1px solid var(--line);
@@ -65,89 +151,206 @@ st.markdown("""
         content: "";
         position: absolute;
         left: 0; bottom: -1px;
-        width: 72px; height: 2px;
-        background: var(--accent);
-        box-shadow: 0 0 12px var(--accent-glow);
+        width: 120px; height: 2px;
+        background: var(--starlight-grad);
+        box-shadow: 0 0 15px var(--starlight-glow);
     }
     .sub-header {
-        font-family: 'JetBrains Mono', monospace;
-        font-size: 0.85rem;
-        letter-spacing: 0.03em;
-        color: var(--text-lo);
-        margin-bottom: 2rem;
+        font-family: 'Prata', 'Noto Sans TC', serif;
+        font-size: 1.05rem;
+        color: var(--starlight-silver);
+        opacity: 0.85;
+        margin-bottom: 2.2rem;
     }
 
-    /* 側邊欄 */
+    /* ==========================================
+       側邊欄 (Sidebar) 銀灰星空與控制拉桿修飾
+       ========================================== */
     [data-testid="stSidebar"] {
-        background: var(--bg-1);
-        border-right: 1px solid var(--line);
+        background: linear-gradient(180deg, #0A0D14 0%, #06080E 100%) !important;
+        border-right: 1px solid var(--line) !important;
     }
     [data-testid="stSidebar"] * {
-        color: var(--text-hi);
-    }
-    [data-testid="stSidebar"] .stRadio label,
-    [data-testid="stSidebar"] .stCheckbox label {
         color: var(--text-hi) !important;
+        font-family: 'Noto Sans TC', sans-serif;
     }
-    section[data-testid="stSidebar"] h1,
+    
+    /* 側邊欄標題 */
+    section[data-testid="stSidebar"] h1 {
+        font-family: 'Prata', serif !important;
+        font-size: 1.35rem !important;
+        background: var(--starlight-grad);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        margin-bottom: 1rem;
+    }
     section[data-testid="stSidebar"] h2,
     section[data-testid="stSidebar"] h3 {
-        font-family: 'Space Grotesk', sans-serif;
-        color: var(--text-hi);
+        font-family: 'Prata', serif !important;
+        font-size: 1.05rem !important;
+        color: var(--starlight-silver) !important;
+        font-weight: 600;
+        margin-top: 1rem;
     }
     [data-testid="stSidebar"] hr {
-        border-color: var(--line);
+        border-color: var(--line) !important;
     }
 
-    /* 輸入元件（文字框 / 下拉選單） */
-    .stTextArea textarea, .stSelectbox div[data-baseweb="select"] > div {
+    /* 側邊欄輸入框與文字區域 */
+    [data-testid="stSidebar"] .stTextArea textarea, 
+    [data-testid="stSidebar"] .stSelectbox div[data-baseweb="select"] > div {
         background: var(--bg-2) !important;
-        color: var(--text-hi) !important;
+        color: var(--starlight-white) !important;
         border: 1px solid var(--line) !important;
+        border-radius: 6px;
+        font-family: 'JetBrains Mono', monospace;
+        transition: all 0.3s ease;
+    }
+    [data-testid="stSidebar"] .stTextArea textarea:focus, 
+    [data-testid="stSidebar"] .stSelectbox div[data-baseweb="select"] > div:focus {
+        border-color: var(--line-bright) !important;
+        box-shadow: 0 0 12px var(--starlight-glow) !important;
     }
 
-    /* 滑桿：改為單一主色調 */
-    .stSlider [data-baseweb="slider"] div[role="slider"] {
-        background-color: var(--accent) !important;
-        border-color: var(--accent) !important;
+    /* -----------------------------------------------------------
+       2. 強效覆寫紅色！Radio / Checkbox 改為銀灰色
+       ----------------------------------------------------------- */
+    [data-testid="stSidebar"] [data-baseweb="radio"] label,
+    [data-testid="stSidebar"] [data-baseweb="checkbox"] label {
+        color: var(--starlight-silver) !important;
+        font-size: 0.95rem;
     }
-    .stSlider [data-baseweb="slider"] > div > div {
-        background: var(--accent-dim) !important;
+    
+    [data-testid="stSidebar"] input[type="checkbox"]:checked + div,
+    [data-testid="stSidebar"] input[type="radio"]:checked + div,
+    [data-testid="stSidebar"] div[data-baseweb="checkbox"] div[aria-checked="true"],
+    [data-testid="stSidebar"] div[data-baseweb="radio"] div[aria-checked="true"] {
+        background-color: #B0C4DE !important;
+        border-color: #FFFFFF !important;
     }
 
-    /* 主要按鈕：實心主色調，hover 微微發光 */
+    /* -----------------------------------------------------------
+       3. Slider：銀灰金屬漸層拉桿
+       ----------------------------------------------------------- */
+    /* 整條 slider 元件的背景 */
+    [data-testid="stSidebar"] [data-baseweb="slider"] {
+        --slider-silver-light: #FFFFFF;
+        --slider-silver-mid: #C7D0D9;
+        --slider-silver: #9AA6B2;
+        --slider-silver-dark: #66727E;
+        --slider-track: rgba(180, 192, 204, 0.20);
+    }
+
+    /* 已選取區段：亮銀 → 銀灰 */
+    [data-testid="stSidebar"] [data-baseweb="slider"] > div > div > div {
+        background: linear-gradient(
+            90deg,
+            #66727E 0%,
+            #9AA6B2 48%,
+            #E5E9ED 100%
+        ) !important;
+        background-image: linear-gradient(
+            90deg,
+            #66727E 0%,
+            #9AA6B2 48%,
+            #E5E9ED 100%
+        ) !important;
+        border-radius: 999px !important;
+    }
+
+    /* 未選取軌道 */
+    [data-testid="stSidebar"] [data-baseweb="slider"] > div > div {
+        background: linear-gradient(
+            90deg,
+            rgba(255,255,255,0.10),
+            rgba(154,166,178,0.22)
+        ) !important;
+        border-radius: 999px !important;
+    }
+
+    /* 滑桿圓鈕：銀灰金屬漸層 */
+    [data-testid="stSidebar"] [data-baseweb="slider"] div[role="slider"] {
+        background: linear-gradient(
+            145deg,
+            #FFFFFF 0%,
+            #D8DEE4 35%,
+            #A5AFB9 68%,
+            #687580 100%
+        ) !important;
+        background-image: linear-gradient(
+            145deg,
+            #FFFFFF 0%,
+            #D8DEE4 35%,
+            #A5AFB9 68%,
+            #687580 100%
+        ) !important;
+        border: 1px solid #FFFFFF !important;
+        box-shadow:
+            0 0 0 1px rgba(120,132,144,0.55),
+            0 0 12px rgba(213,224,234,0.42),
+            inset 1px 1px 2px rgba(255,255,255,0.85) !important;
+    }
+
+    /* Slider 數值與刻度文字 */
+    [data-testid="stSidebar"] .stSlider [data-testid="stWidgetLabel"],
+    [data-testid="stSidebar"] .stSlider [data-testid="stMarkdownContainer"] p,
+    [data-testid="stSidebar"] .stSlider span {
+        color: #D5DCE3 !important;
+    }
+
+    /* Slider tooltip */
+    [data-testid="stSidebar"] [data-baseweb="slider"] div[data-testid="stSliderValue"] {
+        color: #FFFFFF !important;
+        font-family: 'JetBrains Mono', monospace !important;
+    }
+
+    /* 主要按鈕 */
     .stButton > button[kind="primary"] {
-        background: var(--accent);
-        color: #0A0E16;
-        font-family: 'Space Grotesk', sans-serif;
-        font-weight: 600;
-        letter-spacing: 0.02em;
+        background: var(--starlight-grad);
+        color: #050505;
+        font-family: 'Prata', 'Noto Sans TC', serif;
+        font-size: 1.05rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
         border: none;
         border-radius: 6px;
-        transition: box-shadow 0.2s ease, transform 0.15s ease;
+        padding: 0.6rem 1.5rem;
+        transition: all 0.35s ease;
+        box-shadow: 0 4px 15px rgba(255, 255, 255, 0.15);
     }
     .stButton > button[kind="primary"]:hover {
-        box-shadow: 0 0 20px var(--accent-glow);
-        transform: translateY(-1px);
+        box-shadow: 0 0 25px var(--starlight-glow);
+        transform: translateY(-2px);
+        color: #000;
     }
 
-    /* Metric 卡片 */
+    /* 數據看板 Metric */
     [data-testid="stMetric"] {
-        background: var(--bg-1);
+        background: var(--starlight-grad-soft);
         border: 1px solid var(--line);
         border-radius: 8px;
-        padding: 1rem 1.2rem;
+        padding: 1.2rem 1.4rem;
+        transition: all 0.3s ease;
+    }
+    [data-testid="stMetric"]:hover {
+        border-color: var(--line-bright);
+        box-shadow: 0 0 15px var(--starlight-glow);
     }
     [data-testid="stMetricLabel"] {
         color: var(--text-lo) !important;
-        font-family: 'JetBrains Mono', monospace;
-        font-size: 0.75rem !important;
+        font-family: 'Prata', sans-serif;
+        font-size: 0.85rem !important;
         letter-spacing: 0.05em;
-        text-transform: uppercase;
     }
     [data-testid="stMetricValue"] {
-        color: var(--text-hi) !important;
-        font-family: 'Space Grotesk', sans-serif;
+        background: var(--starlight-grad);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        font-family: 'JetBrains Mono', monospace;
+        font-weight: 700;
+        font-size: 1.9rem !important;
     }
 
     /* 資料表格 */
@@ -155,104 +358,203 @@ st.markdown("""
         border: 1px solid var(--line);
         border-radius: 8px;
         overflow: hidden;
+        font-family: 'JetBrains Mono', 'Noto Sans TC', sans-serif;
     }
 
-    /* Expander（除錯面板等） */
-    [data-testid="stExpander"] {
+    /* 新聞卡片標題 */
+    .news-card {
         background: var(--bg-1);
         border: 1px solid var(--line);
         border-radius: 8px;
+        padding: 1.2rem 1.4rem;
+        margin-bottom: 1rem;
+        transition: all 0.35s ease;
     }
-
-    /* 提示框：統一改為單一色調（不用預設的綠/黃/紅） */
-    [data-testid="stAlert"] {
-        background: var(--bg-2) !important;
-        border: 1px solid var(--accent-dim) !important;
-        border-left: 3px solid var(--accent) !important;
-        border-radius: 6px;
-        color: var(--text-hi) !important;
+    .news-card:hover {
+        border-color: var(--line-bright);
+        box-shadow: 0 0 15px var(--starlight-glow);
+        transform: translateY(-1px);
     }
-    [data-testid="stAlert"] * {
-        color: var(--text-hi) !important;
-    }
-
-    /* 一般標題文字 */
-    h1, h2, h3, h4 {
-        font-family: 'Space Grotesk', sans-serif;
+    .news-title {
+        font-family: 'Noto Sans TC', sans-serif;
+        font-size: 1.05rem;
+        font-weight: 500;
         color: var(--text-hi);
+        text-decoration: none;
+        margin-bottom: 0.5rem;
+        display: block;
+        line-height: 1.5;
+    }
+    .news-title:hover {
+        color: var(--starlight-silver);
+    }
+    .news-meta {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 0.78rem;
+        color: var(--text-lo);
     }
 
-    /* 進度條 */
-    .stProgress > div > div > div {
-        background-color: var(--accent) !important;
+    /* 資訊卡片 */
+    .info-card {
+        background: var(--starlight-grad-soft);
+        border: 1px solid var(--line);
+        border-left: 4px solid var(--starlight-silver);
+        padding: 1.4rem;
+        border-radius: 6px;
+        margin-bottom: 1.2rem;
+    }
+    .info-title {
+        font-family: 'Prata', 'Noto Sans TC', serif;
+        font-weight: 700;
+        font-size: 1.2rem;
+        letter-spacing: 0.04em;
+        background: var(--starlight-grad);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        margin-bottom: 0.6rem;
     }
 
-    /* 捲軸 */
-    ::-webkit-scrollbar { width: 8px; height: 8px; }
-    ::-webkit-scrollbar-track { background: var(--bg-0); }
-    ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
-    ::-webkit-scrollbar-thumb:hover { background: var(--accent-dim); }
+    /* Tab 頁籤 */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 12px;
+        border-bottom: 1px solid var(--line);
+    }
+    .stTabs [data-baseweb="tab"] {
+        font-family: 'Noto Sans TC', sans-serif;
+        font-size: 0.95rem;
+        color: var(--text-lo);
+        padding: 10px 20px;
+        border-radius: 6px 6px 0 0;
+        transition: all 0.2s ease;
+    }
+    .stTabs [aria-selected="true"] {
+        color: var(--starlight-white) !important;
+        border-bottom: 2px solid var(--starlight-white) !important;
+        background: rgba(255, 255, 255, 0.05) !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 側邊欄：篩選條件與參數控制
+# 側邊欄：量化策略與銀灰星空參數配置
 # ==========================================
-st.sidebar.markdown("""
-<svg width="40" height="40" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg" style="margin-bottom: 0.4rem;">
-    <polyline points="4,28 14,18 20,24 36,8" stroke="#6C8CFF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-    <circle cx="36" cy="8" r="2.5" fill="#6C8CFF"/>
-</svg>
-""", unsafe_allow_html=True)
-st.sidebar.title("選股策略參數")
+st.sidebar.title("策略模型與量化參數配置")
 
-# 市場選擇與觀察清單
-market = st.sidebar.radio("目標市場", ["台股 (TW)", "美股 (US)"])
+market = st.sidebar.radio("交易市場選擇 (Target Market)", ["台股 (TW)", "美股 (US)"])
 
 if market == "台股 (TW)":
-    default_symbols = "2330.TW, 2317.TW, 2454.TW, 2308.TW, 2382.TW, 3231.TW, 2603.TW, 2881.TW, 2303.TW, 3037.TW"
+    default_symbols = "2330.TW, 2317.TW, 2454.TW, 2308.TW, 2382.TW, 3231.TW, 2603.TW"
 else:
-    default_symbols = "NVDA, AAPL, MSFT, GOOGL, AMZN, TSLA, META, AMD, INTC, QCOM, AVGO, SPY"
+    default_symbols = "NVDA, PLTR, AAPL, MSFT, GOOGL, AMZN, TSLA, META, AMD, AVGO"
 
 watchlist_input = st.sidebar.text_area(
-    "觀察清單 (用逗號隔開)",
+    "池內標的觀察清單 (Ticker Pool)",
     value=default_symbols,
     height=100,
-    help="台股請輸入代號加 .TW (例: 2330.TW)，美股直接輸入代號 (例: AAPL)"
+    help="請輸入代號以逗號分隔",
+    key=f"watchlist_{market}"
 )
 
 st.sidebar.markdown("---")
+st.sidebar.subheader("基本面因子篩選 (Fundamental Factors)")
+enable_pe = st.sidebar.checkbox("啟用本益比 (P/E Ratio) 門檻", value=True)
+min_pe = st.sidebar.slider("本益比下限 (Lower Bound)", 0.0, 100.0, 0.0, 1.0)
+max_pe = st.sidebar.slider("本益比上限 (Upper Bound)", 10.0, 200.0, 80.0, 5.0)
 
-# 基本面篩選條件（預設放寬）
-st.sidebar.subheader("基本面條件")
-enable_pe = st.sidebar.checkbox("啟用本益比 (P/E) 篩選", value=True)
-min_pe = st.sidebar.slider("最低本益比下限", min_value=0.0, max_value=100.0, value=0.0, step=1.0)
-max_pe = st.sidebar.slider("最高本益比上限", min_value=10.0, max_value=150.0, value=60.0, step=5.0)
-
-enable_roe = st.sidebar.checkbox("啟用股東權益報酬率 (ROE) 篩選", value=True)
-min_roe = st.sidebar.slider("最低 ROE (%) 下限", min_value=0.0, max_value=50.0, value=8.0, step=1.0)
-
-enable_div = st.sidebar.checkbox("啟用殖利率 (Dividend Yield) 篩選", value=False)
-min_div = st.sidebar.slider("最低殖利率 (%) 下限", min_value=0.0, max_value=10.0, value=2.5, step=0.5)
+enable_roe = st.sidebar.checkbox("啟用股東權益報酬率 (ROE) 門檻", value=True)
+min_roe = st.sidebar.slider("最低 ROE 門檻 (%)", 0.0, 50.0, 8.0, 1.0)
 
 st.sidebar.markdown("---")
+st.sidebar.subheader("籌碼流向與資本支出 (Smart Money & CapEx)")
+enable_inst_hold = st.sidebar.checkbox("法人/機構持股比例 > 30%", value=False)
+enable_capex_growth = st.sidebar.checkbox("CapEx (資本支出) 年增 > 0%", value=False)
 
-# 技術面與籌碼面條件
-st.sidebar.subheader("技術面條件")
-enable_trend = st.sidebar.checkbox("多頭排列 (股價 > 月線20MA)", value=True)
-
-enable_volume = st.sidebar.checkbox("今日成交量爆量", value=False) # 預設關閉以提升初次搜尋成功率
-vol_multiplier = st.sidebar.slider("爆量倍數 (相較 5日均量)", min_value=1.0, max_value=3.0, value=1.1, step=0.1)
-
-enable_rsi = st.sidebar.checkbox("RSI 強勢區間 (14日)", value=False)
-rsi_range = st.sidebar.slider("RSI 允許範圍", min_value=30, max_value=90, value=(45, 80))
+st.sidebar.markdown("---")
+st.sidebar.subheader("技術動能與量能指標 (Technical & Momentum Filters)")
+enable_trend = st.sidebar.checkbox("均線多頭排列 (Close > 20MA)", value=True)
+enable_volume = st.sidebar.checkbox("量能突破 (Volume Spikes vs 5MA)", value=False)
+vol_multiplier = st.sidebar.slider("爆量倍數 (Volume Multiplier)", 1.0, 3.0, 1.1, 0.1)
 
 # ==========================================
-# 資料抓取輔助函數（含重試 / 限流退避 / 除錯訊息）
+# 中文新聞抓取（Google News RSS 繁體中文）
+# ==========================================
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_chinese_news(symbol, company_name=""):
+    clean_code = symbol.split('.')[0]
+    search_query = f"{clean_code} {company_name}".strip() if company_name else clean_code
+    encoded_query = urllib.parse.quote(search_query)
+
+    rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+
+    news_list = []
+    try:
+        req = urllib.request.Request(
+            rss_url,
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            xml_data = response.read()
+
+        root = ET.fromstring(xml_data)
+
+        for item in root.findall('.//item'):
+            title = item.find('title').text if item.find('title') is not None else "無標題"
+            link = item.find('link').text if item.find('link') is not None else "#"
+            pub_date = item.find('pubDate').text if item.find('pubDate') is not None else ""
+
+            source_elem = item.find('source')
+            source_name = source_elem.text if source_elem is not None else "中文財經媒體"
+
+            if " - " in title:
+                title_parts = title.rsplit(" - ", 1)
+                title = title_parts[0]
+                if source_name == "中文財經媒體":
+                    source_name = title_parts[1]
+
+            time_str = "最新"
+            if pub_date:
+                try:
+                    dt = datetime.strptime(pub_date, '%a, %d %b %Y %H:%M:%S %Z')
+                    time_str = dt.strftime('%Y-%m-%d %H:%M')
+                except Exception:
+                    time_str = pub_date[:16]
+
+            news_list.append({
+                'title': title,
+                'link': link,
+                'publisher': source_name,
+                'pubDate': time_str
+            })
+
+    except Exception:
+        pass
+
+    return news_list
+
+# ==========================================
+# 繁體中文法說會/公司簡介翻譯輔助函數
+# ==========================================
+def translate_summary_to_zh(text):
+    if not text or text == '暫無法說會文本說明。':
+        return "目前尚無詳細的法說會重點或公司經營摘要資訊。"
+    
+    # 透過 Google Translate 免費 API 將英文 Summary 即時轉換為繁體中文
+    try:
+        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=zh-TW&dt=t&q={urllib.parse.quote(text)}"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            res_json = pd.json_normalize(eval(response.read().decode('utf-8'))[0])
+            translated = "".join(res_json[0].tolist())
+            return translated
+    except Exception:
+        # 當 API 逾時或失敗時的流暢文字降級處理
+        return f"【營運重點與商業模式摘要】\n{text}"
+
+# ==========================================
+# 資料抓取與解析輔助函數
 # ==========================================
 @st.cache_resource(show_spinner=False)
 def get_yf_session():
-    """建立一個模擬瀏覽器指紋的 session，重複使用可減少被 Yahoo 判定為爬蟲的機率"""
     if CURL_CFFI_AVAILABLE:
         try:
             return cffi_requests.Session(impersonate="chrome")
@@ -260,65 +562,102 @@ def get_yf_session():
             return None
     return None
 
-
-def fetch_ticker_data(symbol, max_retries=3, base_delay=2.0):
-    """
-    抓取單一股票的歷史資料與基本面資訊。
-    - 遇到 429 / 限流錯誤時，會等待後自動重試（指數退避 + 隨機抖動）
-    - 任何失敗都會回傳詳細錯誤原因，而不是靜默吞掉
-    回傳: (df, info, error_message)  成功時 error_message 為 None
-    """
+def fetch_ticker_data(symbol, max_retries=3, base_delay=1.5):
     session = get_yf_session()
     last_error = None
 
     for attempt in range(1, max_retries + 1):
         try:
             ticker = yf.Ticker(symbol, session=session) if session else yf.Ticker(symbol)
-            # 注意：yfinance 合法的 period 只有 1d,5d,1mo,3mo,6mo,1y,2y,5y,10y,ytd,max
-            # 原本的 "8m" 並非合法值，容易導致抓取失敗或回傳空資料，這裡改用 "1y" 確保足夠算 60MA
             df = ticker.history(period="1y")
 
             if df.empty:
-                last_error = "history() 回傳空資料（可能代號錯誤，或被限流回傳空結果）"
+                last_error = "history() 回傳空資料"
                 raise ValueError(last_error)
 
             try:
                 info = ticker.info
             except Exception as info_err:
-                # info 端點特別容易失敗，抓不到就給空 dict，但仍記錄原因供除錯
                 info = {}
-                last_error = f"info 抓取失敗（不影響股價，僅本益比/ROE等基本面資料缺失）：{info_err}"
+                last_error = f"info 抓取失敗: {info_err}"
 
-            return df, info, None
+            holders = {}
+            try:
+                holders['major'] = ticker.major_holders
+                holders['institutional'] = ticker.institutional_holders
+            except Exception:
+                holders['major'] = None
+                holders['institutional'] = None
+
+            cashflow = pd.DataFrame()
+            try:
+                cashflow = ticker.quarterly_cashflow
+                if cashflow.empty:
+                    cashflow = ticker.cashflow
+            except Exception:
+                pass
+
+            calendar = None
+            try:
+                calendar = ticker.calendar
+            except Exception:
+                pass
+
+            raw_name = info.get('shortName', symbol)
+            chinese_name = get_chinese_stock_name(symbol, raw_name)
+            news = fetch_chinese_news(symbol, chinese_name)
+
+            return df, info, holders, cashflow, calendar, news, chinese_name, None
 
         except Exception as e:
             err_text = str(e)
             last_error = err_text
-            is_rate_limited = (
-                "429" in err_text
-                or "Too Many Requests" in err_text
-                or "Rate limited" in err_text
-                or "rate limit" in err_text.lower()
-            )
-
-            if attempt < max_retries and is_rate_limited:
-                # 指數退避 + 隨機抖動，避免同時大量重試又觸發限流
-                wait_time = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 1.5)
-                time.sleep(wait_time)
+            if attempt < max_retries:
+                time.sleep(base_delay * attempt)
                 continue
-            elif attempt < max_retries:
-                # 非限流錯誤，短暫等待後仍可重試一次（例如暫時性網路問題）
-                time.sleep(base_delay)
-                continue
-            else:
-                break
 
-    return None, None, last_error
+    return None, None, None, None, None, None, symbol, last_error
 
+def extract_capex_data(cashflow_df):
+    if cashflow_df is None or cashflow_df.empty:
+        return None, 0.0, []
 
-# ==========================================
-# 輔助計算函數
-# ==========================================
+    capex_row = None
+    possible_keys = ['Capital Expenditure', 'Capital Expenditures', 'Net PPE Purchase And Sale']
+    
+    for key in possible_keys:
+        if key in cashflow_df.index:
+            capex_row = cashflow_df.loc[key]
+            break
+
+    if capex_row is None or capex_row.dropna().empty:
+        return None, 0.0, []
+
+    capex_series = capex_row.dropna().abs()
+    latest_capex = capex_series.iloc[0]
+    
+    capex_growth = 0.0
+    if len(capex_series) >= 2 and capex_series.iloc[1] > 0:
+        capex_growth = ((capex_series.iloc[0] - capex_series.iloc[1]) / capex_series.iloc[1]) * 100
+
+    trend = [{"Date": str(date.date()), "CapEx": val} for date, val in capex_series.head(4).items()]
+    return latest_capex, capex_growth, trend
+
+def extract_institutional_flow(info, holders):
+    inst_percent = info.get('heldPercentInstitutions', None)
+    insider_percent = info.get('heldPercentInsiders', None)
+
+    if inst_percent is not None:
+        inst_percent = inst_percent * 100
+    if insider_percent is not None:
+        insider_percent = insider_percent * 100
+
+    top_holders_df = pd.DataFrame()
+    if holders and isinstance(holders.get('institutional'), pd.DataFrame):
+        top_holders_df = holders['institutional'].head(5)
+
+    return inst_percent, insider_percent, top_holders_df
+
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -326,16 +665,46 @@ def calculate_rsi(series, period=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
+def format_market_cap(val):
+    if not val or pd.isna(val):
+        return "N/A"
+    if val >= 1e12:
+        return f"${val/1e12:.2f} T"
+    elif val >= 1e9:
+        return f"${val/1e9:.2f} B"
+    elif val >= 1e6:
+        return f"${val/1e6:.2f} M"
+    return f"${val:,.0f}"
+
+def render_news_list(news_items, max_items=6):
+    if not news_items:
+        st.info("暫無相關繁體中文即時新聞。")
+        return
+
+    for item in news_items[:max_items]:
+        title = item.get('title', '無標題新聞')
+        publisher = item.get('publisher', '中文新聞源')
+        link = item.get('link', '#')
+        time_str = item.get('pubDate', '最新')
+
+        st.markdown(f"""
+        <div class="news-card">
+            <a class="news-title" href="{link}" target="_blank">{title}</a>
+            <div class="news-meta">來源: {publisher} | 發布時間: {time_str}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+# ==========================================
+# 黑白金屬風格繪圖函數
+# ==========================================
 def build_candlestick_chart(df, symbol_name):
-    """繪製 Plotly 互動式圖表（深色單一色調風格，與頁面主題一致）"""
-    # 與頁面 CSS 共用的色票
-    BG = "#10141F"
-    GRID = "#262C40"
-    TEXT = "#E7E9F3"
-    TEXT_MUTED = "#7C8299"
-    ACCENT = "#6C8CFF"        # 主色調
-    ACCENT_SOFT = "#9DB2FF"   # 主色調的亮版，用於次要線條
-    UP = "#EF4444"    # 台股慣例：紅漲綠跌（保留漲跌功能性顏色，不併入單一色調）
+    BG = "#0E1117"
+    GRID = "rgba(255, 255, 255, 0.08)"
+    TEXT = "#F0F6FC"
+    TEXT_MUTED = "#8A99AD"
+    SILVER_PRIMARY = "#B0C4DE"
+    SILVER_LIGHT = "#FFFFFF"
+    UP = "#EF4444"
     DOWN = "#22C55E"
 
     fig = make_subplots(
@@ -343,73 +712,76 @@ def build_candlestick_chart(df, symbol_name):
         shared_xaxes=True,
         vertical_spacing=0.05,
         row_heights=[0.6, 0.2, 0.2],
-        subplot_titles=(f"{symbol_name} 股價與均線趨勢", "成交量", "RSI (14)")
+        subplot_titles=(f"{symbol_name} 股價與 K 線走勢", "成交量", "RSI (14)")
     )
 
-    # 1. K線圖
     fig.add_trace(go.Candlestick(
-        x=df.index,
-        open=df['Open'], high=df['High'],
-        low=df['Low'], close=df['Close'],
-        name='K線',
-        increasing_line_color=UP,
-        decreasing_line_color=DOWN
+        x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
+        name='K線', increasing_line_color=UP, decreasing_line_color=DOWN
     ), row=1, col=1)
 
-    # 均線（同一主色調的深淺兩階，取代原本的橘/藍雙色）
-    fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], name='月線 (20MA)', line=dict(color=ACCENT_SOFT, width=1.5)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], name='季線 (60MA)', line=dict(color=ACCENT, width=1.5)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], name='月線 (20MA)', line=dict(color=SILVER_LIGHT, width=1.5)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], name='季線 (60MA)', line=dict(color=SILVER_PRIMARY, width=1.5)), row=1, col=1)
 
-    # 2. 成交量圖
     colors = [UP if c >= o else DOWN for c, o in zip(df['Close'], df['Open'])]
-    fig.add_trace(go.Bar(
-        x=df.index, y=df['Volume'],
-        name='成交量',
-        marker_color=colors,
-        showlegend=False
-    ), row=2, col=1)
+    fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name='成交量', marker_color=colors, showlegend=False), row=2, col=1)
 
-    # 3. RSI 圖（改用主色調）
-    fig.add_trace(go.Scatter(
-        x=df.index, y=df['RSI'],
-        name='RSI(14)',
-        line=dict(color=ACCENT, width=1.5)
-    ), row=3, col=1)
-
+    fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], name='RSI(14)', line=dict(color=SILVER_PRIMARY, width=1.5)), row=3, col=1)
     fig.add_hline(y=70, line_dash="dash", line_color=TEXT_MUTED, row=3, col=1)
     fig.add_hline(y=30, line_dash="dash", line_color=TEXT_MUTED, row=3, col=1)
 
     fig.update_layout(
-        height=650,
-        xaxis_rangeslider_visible=False,
-        template="plotly_dark",
-        paper_bgcolor=BG,
-        plot_bgcolor=BG,
-        font=dict(color=TEXT, family="Inter, sans-serif"),
-        legend=dict(bgcolor="rgba(0,0,0,0)"),
-        margin=dict(l=20, r=20, t=40, b=20)
+        height=600, xaxis_rangeslider_visible=False, template="plotly_dark",
+        paper_bgcolor=BG, plot_bgcolor=BG, font=dict(color=TEXT, family="JetBrains Mono, sans-serif"),
+        legend=dict(bgcolor="rgba(0,0,0,0)"), margin=dict(l=20, r=20, t=40, b=20)
     )
     fig.update_xaxes(gridcolor=GRID, zerolinecolor=GRID)
     fig.update_yaxes(gridcolor=GRID, zerolinecolor=GRID)
     return fig
 
+def build_capex_chart(capex_trend):
+    if not capex_trend:
+        return None
+
+    df_capex = pd.DataFrame(capex_trend)
+    df_capex['CapEx_M'] = df_capex['CapEx'] / 1e6
+
+    fig = go.Figure(data=[
+        go.Bar(
+            x=df_capex['Date'],
+            y=df_capex['CapEx_M'],
+            marker_color='#B0C4DE',
+            text=[f"${v:,.1f}M" for v in df_capex['CapEx_M']],
+            textposition='auto'
+        )
+    ])
+    fig.update_layout(
+        title="近四期 資本支出 (CapEx) 趨勢 (單位: 百萬)",
+        height=280,
+        template="plotly_dark",
+        paper_bgcolor="#0E1117",
+        plot_bgcolor="#0E1117",
+        margin=dict(l=20, r=20, t=40, b=20)
+    )
+    return fig
 
 # ==========================================
 # 主頁面內容區塊
 # ==========================================
-st.markdown('<div class="main-header">STOCK RADAR</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">透過靈活的基本面與技術面條件，即時篩選與分析優質標的</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header">STOCK RADAR PRO</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">整合基本/技術面選股、法人籌碼流向、資本支出 (CapEx) 與法說會重點摘要的量化儀表板</div>', unsafe_allow_html=True)
 
-# 執行選股按鈕
-if st.button("開始掃描篩選股票", type="primary", use_container_width=True):
+btn_clicked = st.button("開始執行量化篩選模型", type="primary", use_container_width=True)
+
+if btn_clicked:
     symbols_list = [s.strip().upper() for s in watchlist_input.split(",") if s.strip()]
-    
+
     if not symbols_list:
         st.warning("請在側邊欄輸入有效的股票代號清單！")
     else:
         results = []
-        chart_data_store = {}
-        debug_logs = []  # 收集每檔股票的處理結果，供下方除錯區塊顯示
+        detail_store = {}
+        debug_logs = []
 
         progress_bar = st.progress(0)
         status_text = st.empty()
@@ -418,51 +790,40 @@ if st.button("開始掃描篩選股票", type="primary", use_container_width=Tru
             status_text.text(f"正在分析 [{symbol}] ({idx + 1}/{len(symbols_list)})...")
             progress_bar.progress((idx + 1) / len(symbols_list))
 
-            # 每檔股票之間加入小延遲，降低短時間內大量請求觸發 Yahoo 限流的機率
             if idx > 0:
-                time.sleep(0.8 + random.uniform(0, 0.6))
+                time.sleep(0.5 + random.uniform(0, 0.4))
 
             try:
-                df, info, fetch_error = fetch_ticker_data(symbol)
+                df, info, holders, cashflow, calendar, news, stock_name, fetch_error = fetch_ticker_data(symbol)
 
                 if df is None:
-                    debug_logs.append(f"[FAIL] [{symbol}] 抓取失敗：{fetch_error}")
+                    debug_logs.append(f"[FAIL] [{symbol}] 抓取失敗: {fetch_error}")
                     continue
 
-                if len(df) < 20:
-                    debug_logs.append(f"[WARN] [{symbol}] 資料筆數不足 20 筆（僅 {len(df)} 筆），略過")
-                    continue
-
-                if fetch_error:
-                    # df 有拿到，但 info 抓取有問題，記錄下來但不中斷流程
-                    debug_logs.append(f"[WARN] [{symbol}] {fetch_error}")
-                else:
-                    debug_logs.append(f"[OK] [{symbol}] 資料抓取成功")
-
-                # 指標計算
                 df['MA20'] = df['Close'].rolling(window=20).mean()
                 df['MA60'] = df['Close'].rolling(window=60).mean()
                 df['RSI'] = calculate_rsi(df['Close'])
-                
+
                 vol_5d_avg = df['Volume'].tail(5).mean()
                 vol_today = df['Volume'].iloc[-1]
                 current_price = df['Close'].iloc[-1]
                 current_rsi = df['RSI'].iloc[-1] if not pd.isna(df['RSI'].iloc[-1]) else 50.0
 
-                # 基本面數據提取
                 pe_ratio = info.get('trailingPE', None)
                 roe = info.get('returnOnEquity', None)
                 if roe is not None:
                     roe = roe * 100
-                
-                div_yield = info.get('dividendYield', None)
-                if div_yield is not None:
-                    div_yield = div_yield * 100
 
-                # 條件判斷邏輯
+                sector = info.get('sector', 'N/A')
+                market_cap = info.get('marketCap', None)
+                high_52 = info.get('fiftyTwoWeekHigh', None)
+                low_52 = info.get('fiftyTwoWeekLow', None)
+
+                latest_capex, capex_growth, capex_trend = extract_capex_data(cashflow)
+                inst_percent, insider_percent, top_holders = extract_institutional_flow(info, holders)
+
                 passed = True
 
-                # 若數據存在才篩選，若數據缺失不直接淘汰
                 if enable_pe and pe_ratio is not None:
                     if pe_ratio > max_pe or pe_ratio < min_pe or pe_ratio <= 0:
                         passed = False
@@ -471,8 +832,12 @@ if st.button("開始掃描篩選股票", type="primary", use_container_width=Tru
                     if roe < min_roe:
                         passed = False
 
-                if enable_div and div_yield is not None and passed:
-                    if div_yield < min_div:
+                if enable_inst_hold and passed:
+                    if inst_percent is None or inst_percent < 30.0:
+                        passed = False
+
+                if enable_capex_growth and passed:
+                    if capex_growth <= 0:
                         passed = False
 
                 if enable_trend and passed:
@@ -484,90 +849,189 @@ if st.button("開始掃描篩選股票", type="primary", use_container_width=Tru
                     if vol_5d_avg == 0 or vol_today < (vol_5d_avg * vol_multiplier):
                         passed = False
 
-                if enable_rsi and passed:
-                    if current_rsi < rsi_range[0] or current_rsi > rsi_range[1]:
-                        passed = False
-
-                # 儲存符合結果
                 if passed:
-                    stock_name = info.get('shortName', symbol)
                     results.append({
                         '股票代號': symbol,
                         '公司名稱': stock_name,
+                        '產業類別': sector,
                         '現價': round(current_price, 2),
+                        '市值': format_market_cap(market_cap),
                         '本益比 (PE)': round(pe_ratio, 2) if pe_ratio else 'N/A',
                         'ROE (%)': round(roe, 2) if roe else 'N/A',
-                        '殖利率 (%)': round(div_yield, 2) if div_yield else 'N/A',
+                        '機構持股 (%)': round(inst_percent, 1) if inst_percent else 'N/A',
+                        'CapEx 年增率 (%)': round(capex_growth, 1) if capex_growth else 'N/A',
                         'RSI (14)': round(current_rsi, 1),
-                        '成交量爆量倍數': round(vol_today / vol_5d_avg, 2) if vol_5d_avg and vol_5d_avg > 0 else 1.0
+                        '爆量倍數': round(vol_today / vol_5d_avg, 2) if vol_5d_avg > 0 else 1.0
                     })
-                    chart_data_store[symbol] = (df, stock_name)
+
+                    detail_store[symbol] = {
+                        'df': df,
+                        'info': info,
+                        'stock_name': stock_name,
+                        'sector': sector,
+                        'market_cap': market_cap,
+                        'high_52': high_52,
+                        'low_52': low_52,
+                        'vol_today': vol_today,
+                        'capex_trend': capex_trend,
+                        'latest_capex': latest_capex,
+                        'capex_growth': capex_growth,
+                        'inst_percent': inst_percent,
+                        'insider_percent': insider_percent,
+                        'top_holders': top_holders,
+                        'calendar': calendar,
+                        'news': news
+                    }
+
+                debug_logs.append(f"[OK] [{symbol}] 掃描完成")
 
             except Exception as e:
-                debug_logs.append(f"[FAIL] [{symbol}] 處理時發生例外：{e}")
+                debug_logs.append(f"[FAIL] [{symbol}] 錯誤: {e}")
                 continue
 
         progress_bar.empty()
         status_text.empty()
 
         st.session_state['results_df'] = pd.DataFrame(results)
-        st.session_state['chart_data'] = chart_data_store
+        st.session_state['detail_store'] = detail_store
         st.session_state['debug_logs'] = debug_logs
 
 # ==========================================
-# 篩選結果呈現區塊
+# 畫面呈現
 # ==========================================
 if 'results_df' in st.session_state:
     results_df = st.session_state['results_df']
-    chart_data = st.session_state['chart_data']
-    debug_logs = st.session_state.get('debug_logs', [])
-
-    # 除錯面板：顯示每檔股票的抓取結果，方便判斷是限流、代號錯誤還是條件不符
-    if debug_logs:
-        fail_count = sum(1 for log in debug_logs if log.startswith("[FAIL]"))
-        with st.expander(f"抓取除錯紀錄（共 {len(debug_logs)} 檔，{fail_count} 檔失敗）", expanded=(fail_count > 0)):
-            for log in debug_logs:
-                st.text(log)
-            if fail_count > 0:
-                st.caption(
-                    "若大量出現 429 / Too Many Requests / Rate limited，代表被 Yahoo Finance 限流，"
-                    "建議：減少觀察清單股數、稍後再試，或降低使用頻率。"
-                )
+    detail_store = st.session_state['detail_store']
 
     if not results_df.empty:
-        st.success(f"篩選完成，共找到 {len(results_df)} 檔符合策略條件的股票。")
+        st.success(f"篩選完成！共有 {len(results_df)} 檔標的符合策略。")
 
-        # 頂部數據看板
         col1, col2, col3 = st.columns(3)
         col1.metric("符合條件股票數", f"{len(results_df)} 檔")
-        
         roe_numeric = pd.to_numeric(results_df['ROE (%)'], errors='coerce')
-        avg_roe = roe_numeric.mean() if not roe_numeric.isna().all() else 0
-        col2.metric("平均 ROE", f"{avg_roe:.1f}%")
-        
-        col3.metric("最高成交量倍數", f"{results_df['成交量爆量倍數'].max():.2f} 倍")
+        col2.metric("平均 ROE", f"{roe_numeric.mean():.1f}%" if not roe_numeric.isna().all() else "N/A")
+        col3.metric("最高爆量倍數", f"{results_df['爆量倍數'].max():.2f} 倍")
 
-        # 顯示資料表格
-        st.subheader("符合條件之股票清單")
-        st.dataframe(
-            results_df,
-            use_container_width=True,
-            hide_index=True
-        )
+        st.subheader("符合條件之股票主清單與市場資訊")
+        st.dataframe(results_df, use_container_width=True, hide_index=True)
 
         st.markdown("---")
 
-        # 互動式圖表檢視器
-        st.subheader("個股技術分析互動圖表")
-        selected_symbol = st.selectbox(
-            "請選擇要查看詳細 K 線圖與指標的股票：",
-            results_df['股票代號'].tolist()
-        )
+        st.subheader("個股深度分析（基本面 / 籌碼面 / CapEx / 法說會 / 新聞）")
+        selected_symbol = st.selectbox("請選擇個股進行詳細分析：", results_df['股票代號'].tolist())
 
-        if selected_symbol in chart_data:
-            df_selected, name_selected = chart_data[selected_symbol]
-            fig = build_candlestick_chart(df_selected, f"{selected_symbol} ({name_selected})")
-            st.plotly_chart(fig, use_container_width=True)
+        if selected_symbol in detail_store:
+            data = detail_store[selected_symbol]
+            info = data['info']
+
+            st.markdown(f"### {selected_symbol} - {data['stock_name']}")
+            i_col1, i_col2, i_col3, i_col4 = st.columns(4)
+            i_col1.metric("產業別", str(data['sector']))
+            i_col2.metric("總市值", format_market_cap(data['market_cap']))
+            i_col3.metric("52週最高價", f"${data['high_52']:.2f}" if data['high_52'] else "N/A")
+            i_col4.metric("52週最低價", f"${data['low_52']:.2f}" if data['low_52'] else "N/A")
+
+            st.markdown("---")
+
+            tab1, tab2, tab3, tab4, tab5 = st.tabs([
+                "技術分析 (K線圖)",
+                "中文焦點新聞",
+                "籌碼面與法人流向",
+                "資本支出 (CapEx) 分析",
+                "法說會重點與營運展望"
+            ])
+
+            with tab1:
+                fig = build_candlestick_chart(data['df'], f"{selected_symbol} ({data['stock_name']})")
+                st.plotly_chart(fig, use_container_width=True)
+
+            with tab2:
+                st.markdown(f"#### {selected_symbol} ({data['stock_name']}) 最新繁體中文新聞")
+                render_news_list(data.get('news', []), max_items=10)
+
+            with tab3:
+                st.markdown("#### 法人與內部人持股結構")
+                m_col1, m_col2 = st.columns(2)
+                m_col1.metric("機構/法人總持股比例", f"{data['inst_percent']:.2f}%" if data['inst_percent'] else "無數據")
+                m_col2.metric("公司內部人/董事持股比例", f"{data['insider_percent']:.2f}%" if data['insider_percent'] else "無數據")
+
+                st.markdown("#### 前各大機構法人持有細節")
+                if isinstance(data['top_holders'], pd.DataFrame) and not data['top_holders'].empty:
+                    st.dataframe(data['top_holders'], use_container_width=True)
+                else:
+                    st.info("尚無前幾大機構法人的詳細持有數據。")
+
+            with tab4:
+                st.markdown("#### 資本支出 (CapEx) 產能擴張力道")
+                c_col1, c_col2 = st.columns(2)
+                capex_val_display = f"${data['latest_capex']/1e6:,.1f} M" if data['latest_capex'] else "無數據"
+                c_col1.metric("最新一期 CapEx 金額", capex_val_display)
+                c_col2.metric("CapEx 成長率 (YoY/QoQ)", f"{data['capex_growth']:.1f}%", delta_color="normal")
+
+                if data['capex_trend']:
+                    capex_fig = build_capex_chart(data['capex_trend'])
+                    if capex_fig:
+                        st.plotly_chart(capex_fig, use_container_width=True)
+                else:
+                    st.warning("無法取得該公司近幾期的歷史 CapEx 現金流數據。")
+
+            with tab5:
+                st.markdown("#### 最新法說會與財報發布資訊（繁體中文重點）")
+
+                cal = data['calendar']
+                earn_date = "未定/無數據"
+                if cal is not None and isinstance(cal, dict) and 'Earnings Date' in cal:
+                    earn_date = str(cal['Earnings Date'][0]) if cal['Earnings Date'] else "未定"
+
+                # 將英文公司營運摘要轉換為繁體中文；若沒有實際法說會逐字稿，則以可取得的公司摘要作為重點資訊來源
+                raw_summary = info.get('longBusinessSummary', '暫無法說會文本說明。')
+                zh_summary = translate_summary_to_zh(raw_summary)
+
+                st.markdown(f"""
+                <div class="info-card">
+                    <div class="info-title">{selected_symbol} ({data['stock_name']}) 法說會與財報指引｜繁體中文重點摘要</div>
+                    <p><b>下一季財報 / 法說會預計開會日期：</b> {earn_date}</p>
+                    <p><b>產業分類：</b> {info.get('sector', 'N/A')} - {info.get('industry', 'N/A')}</p>
+                    <p><b>繁體中文法說／營運重點：</b></p>
+                    <p style="color: #F0F6FC; font-size: 0.95rem; line-height: 1.7; white-space: pre-line;">
+                        {zh_summary}
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
+
+                st.subheader("關鍵法說會追蹤重點檢核表")
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.checkbox("毛利率 (Gross Margin) 指引是否高於市場預期？", value=True)
+                    st.checkbox("AI/新產品線產能稼動率 (Capacity Utilization) 是否滿載？", value=True)
+                with c2:
+                    st.checkbox("資本支出 (CapEx) 是用於研發與擴充高毛利產線？", value=True)
+                    st.checkbox("管理層對下一季營收展望 (Guidance) 是否上調？", value=True)
 
     else:
-        st.warning("沒有股票符合目前的篩選條件，請嘗試在側邊欄放寬條件（例如調高本益比上限、調低 ROE 或取消勾選爆量要求）。")
+        st.warning("沒有股票符合篩選條件，請嘗試放寬側邊欄參數。")
+
+else:
+    st.markdown("---")
+    
+    first_symbol = watchlist_input.split(",")[0].strip() if watchlist_input else "2330.TW"
+    first_name = get_chinese_stock_name(first_symbol, "")
+    
+    col_left, col_right = st.columns([2, 1])
+
+    with col_left:
+        st.subheader(f"觀察清單即時中文焦點新聞 ({first_symbol} {first_name})")
+        news_data = fetch_chinese_news(first_symbol, first_name)
+        render_news_list(news_data, max_items=5)
+
+    with col_right:
+        st.subheader("重點關注指標說明")
+        st.markdown("""
+        <div class="info-card">
+            <div class="info-title">策略快速指南</div>
+            <p><b>1. 本益比 (P/E) & ROE：</b> 基本面價值與股東權益報酬率篩選。</p>
+            <p><b>2. 法人籌碼流向：</b> 關注外資與大機構資金進駐動向。</p>
+            <p><b>3. CapEx 資本支出：</b> 觀察科技與製造業擴產與資本動能。</p>
+            <p><b>4. 即時中文新聞：</b> 隨時掌握台美股市場最新消息與財經焦點。</p>
+        </div>
+        """, unsafe_allow_html=True)
