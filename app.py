@@ -10,6 +10,7 @@ import random
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+import json
 
 # 嘗試使用 curl_cffi 模擬瀏覽器指紋，降低被 Yahoo Finance 限流(429)的機率
 try:
@@ -215,6 +216,16 @@ st.markdown("""
     }
 
     /* -----------------------------------------------------------
+       1.5 覆寫 Streamlit 主題色變數 (--primary-color)
+       Streamlit 內建元件（含 Slider）大量使用此變數作為強調色，
+       直接覆寫可避免殘留的預設紅色 (#FF4B4B) 在部分節點露出。
+       建議同時搭配 .streamlit/config.toml 設定 primaryColor。
+       ----------------------------------------------------------- */
+    :root, .stApp, [data-testid="stSidebar"] {
+        --primary-color: #9AA6B2 !important;
+    }
+
+    /* -----------------------------------------------------------
        2. 強效覆寫紅色！Radio / Checkbox 改為銀灰色
        ----------------------------------------------------------- */
     [data-testid="stSidebar"] [data-baseweb="radio"] label,
@@ -304,6 +315,38 @@ st.markdown("""
     [data-testid="stSidebar"] [data-baseweb="slider"] div[data-testid="stSliderValue"] {
         color: #FFFFFF !important;
         font-family: 'JetBrains Mono', monospace !important;
+    }
+
+    /* 最終強制覆寫：BaseWeb Slider 實際結構 */
+    [data-testid="stSidebar"] .stSlider [data-baseweb="slider"] [role="slider"] {
+        background: linear-gradient(145deg, #FFFFFF 0%, #D9DEE3 28%, #A6B0BA 62%, #687580 100%) !important;
+        background-image: linear-gradient(145deg, #FFFFFF 0%, #D9DEE3 28%, #A6B0BA 62%, #687580 100%) !important;
+        border: 2px solid #F5F7F9 !important;
+        border-radius: 50% !important;
+        box-shadow: 0 0 0 1px #7B8792, 0 0 14px rgba(220,230,240,.55), inset 1px 1px 2px rgba(255,255,255,.9) !important;
+    }
+
+    [data-testid="stSidebar"] .stSlider [data-baseweb="slider"] > div > div {
+        background: #3B4651 !important;
+        border-radius: 999px !important;
+    }
+
+    [data-testid="stSidebar"] .stSlider [data-baseweb="slider"] > div > div > div {
+        background: linear-gradient(90deg, #6B7782 0%, #AEB8C1 48%, #F0F2F4 100%) !important;
+        background-image: linear-gradient(90deg, #6B7782 0%, #AEB8C1 48%, #F0F2F4 100%) !important;
+        border-radius: 999px !important;
+    }
+
+    /* 拖曳/聚焦時彈出的數值氣泡（新版 Streamlit 結構）與 focus 光暈 */
+    [data-testid="stSidebar"] [data-testid="stThumbValue"],
+    [data-testid="stSidebar"] [data-baseweb="slider"] [role="slider"] [data-testid="stTickBar"] {
+        color: #F0F2F4 !important;
+        background: #3B4651 !important;
+    }
+    [data-testid="stSidebar"] [data-baseweb="slider"] [role="slider"]:focus,
+    [data-testid="stSidebar"] [data-baseweb="slider"] [role="slider"]:focus-visible {
+        box-shadow: 0 0 0 6px rgba(213, 224, 234, 0.28) !important;
+        outline: none !important;
     }
 
     /* 主要按鈕 */
@@ -534,21 +577,49 @@ def fetch_chinese_news(symbol, company_name=""):
 # ==========================================
 # 繁體中文法說會/公司簡介翻譯輔助函數
 # ==========================================
+def _translate_via_google(text):
+    """透過 Google Translate 免費端點翻譯（無官方 API 金鑰）。"""
+    url = (
+        "https://translate.googleapis.com/translate_a/single"
+        f"?client=gtx&sl=auto&tl=zh-TW&dt=t&q={urllib.parse.quote(text)}"
+    )
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    with urllib.request.urlopen(req, timeout=6) as response:
+        payload = json.loads(response.read().decode('utf-8'))
+        segments = payload[0]
+        translated = "".join(seg[0] for seg in segments if seg and seg[0])
+        return translated.strip()
+
+
+def _translate_via_mymemory(text):
+    """備援翻譯端點：MyMemory（單次請求長度有限，超長文字會先截斷）。"""
+    snippet = text[:490]
+    url = (
+        "https://api.mymemory.translated.net/get"
+        f"?q={urllib.parse.quote(snippet)}&langpair=en|zh-TW"
+    )
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    with urllib.request.urlopen(req, timeout=6) as response:
+        payload = json.loads(response.read().decode('utf-8'))
+        translated = payload.get('responseData', {}).get('translatedText', '')
+        return translated.strip()
+
+
 def translate_summary_to_zh(text):
     if not text or text == '暫無法說會文本說明。':
         return "目前尚無詳細的法說會重點或公司經營摘要資訊。"
-    
-    # 透過 Google Translate 免費 API 將英文 Summary 即時轉換為繁體中文
-    try:
-        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=zh-TW&dt=t&q={urllib.parse.quote(text)}"
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=5) as response:
-            res_json = pd.json_normalize(eval(response.read().decode('utf-8'))[0])
-            translated = "".join(res_json[0].tolist())
-            return translated
-    except Exception:
-        # 當 API 逾時或失敗時的流暢文字降級處理
-        return f"【營運重點與商業模式摘要】\n{text}"
+
+    # 依序嘗試多個翻譯來源，確保最終呈現的內容為繁體中文
+    for translator in (_translate_via_google, _translate_via_mymemory):
+        try:
+            translated = translator(text)
+            if translated:
+                return translated
+        except Exception:
+            continue
+
+    # 所有翻譯來源皆失敗時，仍以繁體中文提示告知使用者，不再顯示原文英文內容
+    return "【翻譯服務暫時無法連線】\n目前無法即時取得繁體中文版法說會重點摘要，請稍後重新整理頁面再試一次。"
 
 # ==========================================
 # 資料抓取與解析輔助函數
